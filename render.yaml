@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: afveo-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: APP_SECRET
+        generateValue: true
+      - key: TMDB_API_KEY
+        value: 60a8d6ad3b8e5fbdbde539526b196d9b
+      - key: BASE_URL
+        sync: false

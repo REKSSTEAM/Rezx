@@ -1,0 +1,14 @@
+Options -Indexes
+RewriteEngine On
+
+# السماح لملفات PHP مباشرة
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+# منع الوصول لمجلد data
+RewriteRule ^data/ - [F,L]
+
+# هيدرات CORS للتطبيق
+Header always set Access-Control-Allow-Origin "*"
+Header always set Access-Control-Allow-Methods "GET, POST, OPTIONS"
+Header always set Access-Control-Allow-Headers "Content-Type, X-API-Key"
