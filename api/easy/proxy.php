@@ -10,14 +10,18 @@ function b64d(string $s): string { $s = strtr($s, '-_', '+/'); $p = strlen($s) %
 function bad(string $m, int $c = 400): never { http_response_code($c); header('Content-Type: application/json'); echo json_encode(['ok'=>false,'error'=>$m]); exit; }
 function proxy_self(string $url): string {
     $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') === '443');
-    $base = ($https ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . '/api/easy/proxy.php?u=';
+    $base = 'https://' . (isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost') . '/api/easy/proxy.php?u=';
     return $base . rawurlencode(rtrim(strtr(base64_encode($url), '+/', '-_'), '='));
 }
-$url = b64d((string)($_GET['u'] ?? ''));
-$p = parse_url($url); $host = strtolower($p['host'] ?? ''); $path = $p['path'] ?? '';
-if (!$p || ($p['scheme'] ?? '') !== 'https' || $host === '') bad('invalid target');
+$encoded = isset($_GET['u']) ? (string)$_GET['u'] : '';
+$url = b64d($encoded);
+if (stripos($url, 'http://') === 0) $url = 'https://' . substr($url, 7);
+$p = parse_url($url);
+$host = isset($p['host']) ? strtolower($p['host']) : '';
+$path = isset($p['path']) ? $p['path'] : '';
+if (!$p || !isset($p['scheme']) || strtolower($p['scheme']) !== 'https' || $host === '') bad('invalid target');
 $local = strtolower($_SERVER['HTTP_HOST'] ?? '');
-$allowed = ($host === $local && (str_starts_with($path, '/api/lookmovie/proxy.php') || str_starts_with($path, '/api/animecurx/proxy/')))
+$allowed = ($host === $local && (str_starts_with($path, '/api/lookmovie/proxy.php') || str_starts_with($path, '/api/animecurx/proxy.php')))
     || $host === 'www.lookmovie2.to' || str_ends_with($host, '.lookmovie2.to')
     || str_ends_with($host, '.egnardess.store') || str_ends_with($host, '.scracting.store')
     || str_ends_with($host, '.proarderly.store') || $host === 'embed.animecurx.tech';
