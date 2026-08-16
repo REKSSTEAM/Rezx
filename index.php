@@ -1,8 +1,7 @@
 <?php
 
 header('Content-Type: application/json; charset=utf-8');
-
-$url = 'https://api.themoviedb.org/3/configuration';
+$url = 'https://httpbin.org/get';
 
 $ch = curl_init($url);
 
