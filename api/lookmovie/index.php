@@ -28,7 +28,7 @@ if (!$id) {
 // ── cache ─────────────────────────────────────────────────────────────────────
 $cache_dir  = __DIR__ . '/../../data/cache/lookmovie';
 if (!is_dir($cache_dir)) @mkdir($cache_dir, 0777, true);
-$cache_key  = "{$type}-{$id}" . ($type === 'tv' ? "-{$season}-{$episode}" : '');
+$cache_key  = "proxy-v2-{$type}-{$id}" . ($type === 'tv' ? "-{$season}-{$episode}" : '');
 $cache_file = $cache_dir . '/' . $cache_key . '.json';
 
 if (is_file($cache_file) && (time() - filemtime($cache_file)) < 600) {
@@ -103,16 +103,20 @@ function lm_tmdb_meta(string $type, int $id): ?array {
 
 // ── build quality list from streams array ─────────────────────────────────────
 // Routed through this server's own proxy.php (not the shared hls-proxy.php).
-function lm_hls_proxy(string $url): string {
-    // افتراضياً: رابط مباشر (CDN يرسل Access-Control-Allow-Origin: *).
-    // هذا مهم على الاستضافات المشتركة مثل InfinityFree — تمرير الفيديو عبر PHP
-    // بطيء ويستهلك الحصة ويؤدي لتوقف البث.
-    // للعودة للوسيط: أضف &proxy=1 إلى طلب الـ API.
-    if (($_GET['proxy'] ?? '') !== '1') return $url;
+function lm_proxy_base(): string {
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') === '443');
+    $scheme = $https ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    if ($host === '') return '/api/lookmovie/proxy.php';
+    return $scheme . '://' . $host . '/api/lookmovie/proxy.php';
+}
 
+function lm_hls_proxy(string $url): string {
+    // Master always returns this project's own proxy URL.
+    // The proxy rewrites the playlist and serves relative segments through itself.
     $u = rtrim(strtr(base64_encode($url), '+/', '-_'), '=');
     $r = rtrim(strtr(base64_encode('https://www.lookmovie2.to/'), '+/', '-_'), '=');
-    return '/api/lookmovie/proxy.php?u=' . $u . '&r=' . $r;
+    return lm_proxy_base() . '?u=' . rawurlencode($u) . '&r=' . rawurlencode($r);
 }
 
 function lm_build_qualities(array $streams): array {
@@ -273,7 +277,7 @@ foreach ($raw_subs as $s) {
     $lang_count[$lang]++;
     $label = $lang_count[$lang] > 1 ? $lang . ' ' . $lang_count[$lang] : $lang;
 
-    $subtitles[] = ['label' => $label, 'url' => $url];
+    $subtitles[] = ['label' => $label, 'url' => lm_hls_proxy($url)];
 }
 
 $out = json_encode([
