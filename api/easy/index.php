@@ -50,6 +50,7 @@ function easy_b64_decode($value) {
 
 function easy_proxy_url($url) {
     $url = (string)$url;
+    if (stripos($url, 'http://') === 0) $url = 'https://' . substr($url, 7);
     $parts = parse_url($url);
     $path = isset($parts['path']) ? $parts['path'] : '';
     $host = isset($parts['host']) ? strtolower($parts['host']) : '';
@@ -59,7 +60,9 @@ function easy_proxy_url($url) {
         if (isset($parts['query'])) parse_str($parts['query'], $query);
         if (!empty($query['u'])) {
             $original = easy_b64_decode($query['u']);
-            if ($original !== '') $url = $original;
+            if ($original !== '') {
+                $url = (stripos($original, 'http://') === 0) ? 'https://' . substr($original, 7) : $original;
+            }
         }
     }
     if ($host !== '' && $local !== '' && $host === $local && strpos($path, '/api/easy/proxy.php') !== false) return preg_replace('#^http://#i', 'https://', $url);
