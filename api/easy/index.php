@@ -34,14 +34,35 @@ function easy_auth() {
 }
 
 function easy_base_url() {
-    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
     $host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
-    return $scheme . '://' . $host;
+    return 'https://' . $host;
 }
 
 function easy_url($path) { return easy_base_url() . $path; }
 
+function easy_b64_decode($value) {
+    $value = strtr((string)$value, '-_', '+/');
+    $pad = strlen($value) % 4;
+    if ($pad) $value .= str_repeat('=', 4 - $pad);
+    $decoded = base64_decode($value, true);
+    return ($decoded === false) ? '' : $decoded;
+}
+
 function easy_proxy_url($url) {
+    $url = (string)$url;
+    $parts = parse_url($url);
+    $path = isset($parts['path']) ? $parts['path'] : '';
+    $host = isset($parts['host']) ? strtolower($parts['host']) : '';
+    $local = isset($_SERVER['HTTP_HOST']) ? strtolower($_SERVER['HTTP_HOST']) : '';
+    if ($host !== '' && $local !== '' && $host === $local && (strpos($path, '/api/lookmovie/proxy.php') !== false || strpos($path, '/api/animecurx/proxy.php') !== false)) {
+        $query = array();
+        if (isset($parts['query'])) parse_str($parts['query'], $query);
+        if (!empty($query['u'])) {
+            $original = easy_b64_decode($query['u']);
+            if ($original !== '') $url = $original;
+        }
+    }
+    if ($host !== '' && $local !== '' && $host === $local && strpos($path, '/api/easy/proxy.php') !== false) return preg_replace('#^http://#i', 'https://', $url);
     $encoded = rtrim(strtr(base64_encode($url), '+/', '-_'), '=');
     return easy_url('/api/easy/proxy.php?u=' . rawurlencode($encoded));
 }
