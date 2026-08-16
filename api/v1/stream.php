@@ -1,24 +1,33 @@
 <?php
 /**
- * AFVeo Stream API — v1
+ * AFVeo Stream API — v2
  * ─────────────────────────────────────────────────────────────────
- * الحماية: توكن HMAC موقّع بـ APP_SECRET مال الموقع
+ * نظام خطوتين:
  *
- * الخطوة 1 — احصل على توكن:
+ * الخطوة 1 — قائمة المصادر (سريع):
+ *   GET ?action=providers&type=movie&id=550&token=TOKEN
+ *   → { providers: [{id, name}] }
+ *
+ * الخطوة 2 — روابط مصدر محدد:
+ *   GET ?action=sources&type=movie&id=550&provider=lookmovie&token=TOKEN
+ *   للمسلسلات: أضف &season=1&episode=1
+ *   → { sources:[{qualities,subtitles}] }
+ *
+ * التوكن:
  *   GET ?action=token&type=movie&id=550
  *   → { token, expires_at, refresh_at }
- *
- * الخطوة 2 — اطلب الروابط:
- *   GET ?action=sources&type=movie&id=550&token=TOKEN
- *   للمسلسلات: أضف &season=1&episode=1
  */
+
+if (function_exists('opcache_reset')) opcache_reset();
+if (function_exists('opcache_invalidate')) opcache_invalidate(__FILE__, true);
 
 require_once __DIR__ . '/../../config.php';
 
 header('Content-Type: application/json; charset=utf-8');
-header('Cache-Control: no-store');
+header('Cache-Control: no-store, no-cache, must-revalidate');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Headers: Content-Type');
+header('X-AFVeo-Version: 3.0');
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -32,40 +41,48 @@ function api_ok(array $data): never {
     exit;
 }
 
-// ── توليد توكن API (يدوم 24 ساعة) ───────────────────────────────────────────
-function api_make_token(string $type, int $id): array {
-    $secret  = APP_SECRET;
-    $exp     = time() + 86400; // 24 ساعة
-    $marker  = 'apiv1';
-    $payload = "{$type}|{$id}|{$exp}|{$marker}";
-    $sig     = hash_hmac('sha256', $payload, $secret);
-    $token   = rtrim(base64_encode("{$payload}|{$sig}"), '=');
+// ── قائمة Providers ───────────────────────────────────────────────────────────
+function get_providers(): array {
     return [
-        'token'      => $token,
-        'expires_at' => $exp,
-        'refresh_at' => $exp - 3600, // جدد قبل ساعة
+        [
+            'id'   => 'lookmovie',
+            'name' => 'LookMovie',
+            'file' => __DIR__ . '/../lookmovie/index.php',
+        ],
+        [
+            'id'   => 'animecurx',
+            'name' => 'AnimeCurX',
+            'file' => __DIR__ . '/../animecurx/index.php',
+        ],
     ];
 }
 
-// ── التحقق من توكن API ────────────────────────────────────────────────────────
+// ── توليد توكن (24 ساعة) ─────────────────────────────────────────────────────
+function api_make_token(string $type, int $id): array {
+    $secret  = APP_SECRET;
+    $exp     = time() + 86400;
+    $payload = "{$type}|{$id}|{$exp}|apiv1";
+    $sig     = hash_hmac('sha256', $payload, $secret);
+    return [
+        'token'      => rtrim(base64_encode("{$payload}|{$sig}"), '='),
+        'expires_at' => $exp,
+        'refresh_at' => $exp - 3600,
+    ];
+}
+
+// ── التحقق من التوكن ──────────────────────────────────────────────────────────
 function api_verify_token(string $token, string $type, int $id): void {
     if (!$token) api_err('token مطلوب', 401);
-
-    $secret = APP_SECRET;
-    $pad    = strlen($token) % 4;
-    $padded = $pad ? $token . str_repeat('=', 4 - $pad) : $token;
-    $decoded = base64_decode($padded, true);
+    $secret  = APP_SECRET;
+    $pad     = strlen($token) % 4;
+    $decoded = base64_decode($pad ? $token . str_repeat('=', 4 - $pad) : $token, true);
     if (!$decoded) api_err('token غير صالح', 401);
-
     $parts = explode('|', $decoded);
     if (count($parts) !== 5) api_err('token تالف', 401);
-
     [$tok_type, $tok_id, $tok_exp, $marker, $sig] = $parts;
-
     if ($marker !== 'apiv1') api_err('token غير صالح', 401);
     if ((int)$tok_exp < time()) api_err('token منتهي — اطلب توكناً جديداً', 401);
     if ($tok_type !== $type || (int)$tok_id !== $id) api_err('token لا يطابق الطلب', 401);
-
     $expected = hash_hmac('sha256', "{$tok_type}|{$tok_id}|{$tok_exp}|{$marker}", $secret);
     if (!hash_equals($expected, $sig)) api_err('توقيع token خاطئ', 401);
 }
@@ -73,48 +90,38 @@ function api_verify_token(string $token, string $type, int $id): void {
 // ── Subtitle language detector ─────────────────────────────────────────────────
 function detect_lang(string $label, string $url = ''): array {
     static $map = [
-        'arabic'=>'ar','عربي'=>'ar','عربية'=>'ar',
-        'english'=>'en','french'=>'fr','spanish'=>'es',
-        'german'=>'de','turkish'=>'tr','persian'=>'fa',
-        'russian'=>'ru','italian'=>'it','portuguese'=>'pt',
-        'dutch'=>'nl','polish'=>'pl','czech'=>'cs',
-        'slovak'=>'sk','romanian'=>'ro','greek'=>'el',
-        'hebrew'=>'he','japanese'=>'ja','korean'=>'ko',
-        'chinese'=>'zh','vietnamese'=>'vi','indonesian'=>'id',
-        'malay'=>'ms','thai'=>'th','hindi'=>'hi',
-        'urdu'=>'ur','tamil'=>'ta','ukrainian'=>'uk',
-        'norwegian'=>'no','danish'=>'da','finnish'=>'fi',
-        'swedish'=>'sv','bosnian'=>'bs','serbian'=>'sr','uzbek'=>'uz',
+        'arabic'=>'ar','عربي'=>'ar','عربية'=>'ar','english'=>'en','french'=>'fr',
+        'spanish'=>'es','german'=>'de','turkish'=>'tr','persian'=>'fa','russian'=>'ru',
+        'italian'=>'it','portuguese'=>'pt','dutch'=>'nl','polish'=>'pl','czech'=>'cs',
+        'slovak'=>'sk','romanian'=>'ro','greek'=>'el','hebrew'=>'he','japanese'=>'ja',
+        'korean'=>'ko','chinese'=>'zh','vietnamese'=>'vi','indonesian'=>'id','malay'=>'ms',
+        'thai'=>'th','hindi'=>'hi','urdu'=>'ur','tamil'=>'ta','ukrainian'=>'uk',
+        'norwegian'=>'no','danish'=>'da','finnish'=>'fi','swedish'=>'sv','bosnian'=>'bs',
+        'serbian'=>'sr','uzbek'=>'uz',
     ];
     static $labels = [
-        'ar'=>'Arabic','en'=>'English','fr'=>'French','es'=>'Spanish',
-        'de'=>'German','tr'=>'Turkish','fa'=>'Persian','ru'=>'Russian',
-        'it'=>'Italian','pt'=>'Portuguese','nl'=>'Dutch','pl'=>'Polish',
-        'cs'=>'Czech','sk'=>'Slovak','ro'=>'Romanian','el'=>'Greek',
-        'he'=>'Hebrew','ja'=>'Japanese','ko'=>'Korean','zh'=>'Chinese',
-        'vi'=>'Vietnamese','id'=>'Indonesian','ms'=>'Malay','th'=>'Thai',
-        'hi'=>'Hindi','ur'=>'Urdu','ta'=>'Tamil','uk'=>'Ukrainian',
-        'no'=>'Norwegian','da'=>'Danish','fi'=>'Finnish','sv'=>'Swedish',
-        'bs'=>'Bosnian','sr'=>'Serbian','uz'=>'Uzbek',
+        'ar'=>'Arabic','en'=>'English','fr'=>'French','es'=>'Spanish','de'=>'German',
+        'tr'=>'Turkish','fa'=>'Persian','ru'=>'Russian','it'=>'Italian','pt'=>'Portuguese',
+        'nl'=>'Dutch','pl'=>'Polish','cs'=>'Czech','sk'=>'Slovak','ro'=>'Romanian',
+        'el'=>'Greek','he'=>'Hebrew','ja'=>'Japanese','ko'=>'Korean','zh'=>'Chinese',
+        'vi'=>'Vietnamese','id'=>'Indonesian','ms'=>'Malay','th'=>'Thai','hi'=>'Hindi',
+        'ur'=>'Urdu','ta'=>'Tamil','uk'=>'Ukrainian','no'=>'Norwegian','da'=>'Danish',
+        'fi'=>'Finnish','sv'=>'Swedish','bs'=>'Bosnian','sr'=>'Serbian','uz'=>'Uzbek',
     ];
-
     $lower = strtolower($label);
     foreach ($map as $word => $code)
         if (str_contains($lower, $word))
             return ['language' => $code, 'label' => $labels[$code] ?? ucfirst($word)];
-
-    // كود اللغة من URL مثل ar_xxx.vtt
     if (preg_match('#[/_]([a-z]{2})[-_][a-f0-9]{8,}\.vtt#i', $url, $m)) {
         $code = strtolower($m[1]);
         if (isset($labels[$code])) return ['language' => $code, 'label' => $labels[$code]];
     }
-    if (preg_match('/^zh/i', $lower)) return ['language' => 'zh', 'label' => 'Chinese'];
-    if (preg_match('/^pt/i', $lower)) return ['language' => 'pt', 'label' => 'Portuguese'];
-
+    if (str_starts_with($lower, 'zh')) return ['language' => 'zh', 'label' => 'Chinese'];
+    if (str_starts_with($lower, 'pt')) return ['language' => 'pt', 'label' => 'Portuguese'];
     return ['language' => 'unknown', 'label' => ucwords($label)];
 }
 
-// ── Normalize provider output → UnifiedSource ─────────────────────────────────
+// ── Normalize provider output ─────────────────────────────────────────────────
 function normalize_provider(array $provider, ?array $payload): array {
     $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
     $origin = $scheme . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost');
@@ -147,7 +154,7 @@ function normalize_provider(array $provider, ?array $payload): array {
         }
     }
 
-    // Normalize subtitles
+    // normalize subtitles
     $subtitles = []; $seen = [];
     foreach ($raw_subs as $sub) {
         if (empty($sub['url'])) continue;
@@ -156,15 +163,8 @@ function normalize_provider(array $provider, ?array $payload): array {
         $key  = $lang['language'] . '|' . md5($url);
         if (isset($seen[$key])) continue;
         $seen[$key] = true;
-        $subtitles[] = [
-            'language' => $lang['language'],
-            'label'    => $lang['label'],
-            'url'      => $url,
-            'format'   => $sub['format'] ?? 'vtt',
-        ];
+        $subtitles[] = ['language' => $lang['language'], 'label' => $lang['label'], 'url' => $url, 'format' => $sub['format'] ?? 'vtt'];
     }
-
-    // العربية أولاً، الإنجليزية ثانياً
     usort($subtitles, function($a, $b) {
         $o = ['ar' => 0, 'en' => 1];
         $oa = $o[$a['language']] ?? 99;
@@ -172,23 +172,21 @@ function normalize_provider(array $provider, ?array $payload): array {
         return $oa !== $ob ? $oa - $ob : strcmp($a['label'], $b['label']);
     });
 
-    $ok = !empty($qualities);
     return [
         'id'            => $provider['id'],
         'name'          => $provider['name'],
-        'ok'            => $ok,
+        'ok'            => !empty($qualities),
         'type'          => 'hls',
         'qualities'     => array_values($qualities),
         'subtitles'     => array_values($subtitles),
         'subtitle_count'=> count($subtitles),
-        'error'         => $ok ? null : ($payload['error'] ?? 'No sources'),
+        'error'         => empty($qualities) ? ($payload['error'] ?? 'No sources') : null,
     ];
 }
 
-// ── استدعاء provider داخلياً ──────────────────────────────────────────────────
+// ── استدعاء provider واحد ────────────────────────────────────────────────────
 function call_provider(array $provider, string $type, int $id, int $season, int $episode): array {
     if (!file_exists($provider['file'])) return normalize_provider($provider, null);
-
     $internal = sec_internal_api_token($type, $id);
     $saved    = $_GET;
     $_GET = ['type' => $type, 'id' => $id, '_st' => $internal, '_ts' => time(), '_nonce' => bin2hex(random_bytes(8))];
@@ -197,13 +195,11 @@ function call_provider(array $provider, string $type, int $id, int $season, int 
         $_GET['action'] = 'streams'; $_GET['format'] = 'player';
         if ($type === 'tv') { $_GET['s'] = $season; $_GET['e'] = $episode; }
     }
-
     ob_start();
-    try { set_time_limit(20); include $provider['file']; }
+    try { set_time_limit(45); include $provider['file']; }
     catch (Throwable $ex) { ob_clean(); echo json_encode(['ok' => false, 'error' => $ex->getMessage()]); }
     $body = trim(ob_get_clean());
     $_GET = $saved;
-
     $payload = json_decode($body, true);
     if (!is_array($payload)) {
         preg_match('/(\{.+\})/s', $body, $m);
@@ -227,42 +223,76 @@ function fetch_title(string $type, int $id): string {
 $action  = $_GET['action'] ?? '';
 $type    = ($_GET['type'] ?? 'movie') === 'tv' ? 'tv' : 'movie';
 $id      = (int)($_GET['id'] ?? 0);
+$token   = $_GET['token'] ?? '';
 
-// ── token ─────────────────────────────────────────────────────────────────────
+// ── action=token ──────────────────────────────────────────────────────────────
 if ($action === 'token') {
     if ($id < 1) api_err('id مطلوب');
     api_ok(api_make_token($type, $id));
 }
 
-// ── sources ───────────────────────────────────────────────────────────────────
-if ($action === 'sources') {
+// ── action=providers — الخطوة 1: قائمة المصادر المتاحة (بدون جلب روابط) ─────
+if ($action === 'providers') {
     if ($id < 1) api_err('id مطلوب');
-    $season  = max(1, (int)($_GET['season']  ?? 1));
-    $episode = max(1, (int)($_GET['episode'] ?? 1));
-    $token   = $_GET['token'] ?? '';
-
     api_verify_token($token, $type, $id);
 
-    set_time_limit(45);
+    $list = array_map(fn($p) => [
+        'id'   => $p['id'],
+        'name' => $p['name'],
+    ], get_providers());
 
-    // ── أضف providers هنا ──
-    $providers = [
-        ['id' => 'lookmovie', 'name' => 'LookMovie', 'file' => __DIR__ . '/../lookmovie/index.php'],
-        ['id' => 'animecurx', 'name' => 'AnimeCurX', 'file' => __DIR__ . '/../animecurx/index.php'],
-    ];
+    api_ok([
+        'tmdb_id'   => $id,
+        'type'      => $type,
+        'title'     => fetch_title($type, $id),
+        'providers' => $list,
+    ]);
+}
 
+// ── action=sources — الخطوة 2: روابط مصدر محدد ───────────────────────────────
+if ($action === 'sources') {
+    if ($id < 1) api_err('id مطلوب');
+    api_verify_token($token, $type, $id);
+
+    $provider_id = $_GET['provider'] ?? '';
+    $season      = max(1, (int)($_GET['season']  ?? 1));
+    $episode     = max(1, (int)($_GET['episode'] ?? 1));
+
+    $providers = get_providers();
+
+    // إذا طُلب provider محدد
+    if ($provider_id) {
+        $found = null;
+        foreach ($providers as $p) {
+            if ($p['id'] === $provider_id) { $found = $p; break; }
+        }
+        if (!$found) api_err("provider '{$provider_id}' غير موجود");
+
+        set_time_limit(60);
+        $result = call_provider($found, $type, $id, $season, $episode);
+        api_ok([
+            'tmdb_id'  => $id,
+            'type'     => $type,
+            'provider' => $result['id'],
+            'name'     => $result['name'],
+            'ok'       => $result['ok'],
+            'qualities'     => $result['qualities'],
+            'subtitles'     => $result['subtitles'],
+            'subtitle_count'=> $result['subtitle_count'],
+            'error'    => $result['error'],
+        ]);
+    }
+
+    // إذا ما طُلب provider — رجع كل المصادر
+    set_time_limit(90);
     $sources = [];
     foreach ($providers as $p) {
         $r = call_provider($p, $type, $id, $season, $episode);
         if ($r['ok']) $sources[] = $r;
     }
-
     api_ok([
         'tmdb_id' => $id,
         'type'    => $type,
-        'title'   => fetch_title($type, $id),
-        'season'  => $type === 'tv' ? $season  : null,
-        'episode' => $type === 'tv' ? $episode : null,
         'sources' => $sources,
         'any_ok'  => !empty($sources),
     ]);
@@ -271,15 +301,15 @@ if ($action === 'sources') {
 // ── docs ──────────────────────────────────────────────────────────────────────
 if ($action === 'docs' || $action === '') {
     api_ok([
-        'api'     => 'AFVeo Stream API v1',
-        'base'    => ((!empty($_SERVER['HTTPS']))?'https':'http') . '://' . $_SERVER['HTTP_HOST'] . '/api/v1/stream.php',
-        'usage'   => [
-            'step1_token'   => '?action=token&type=movie&id=550',
-            'step2_sources' => '?action=sources&type=movie&id=550&token=TOKEN',
-            'tv_example'    => '?action=sources&type=tv&id=1396&season=1&episode=1&token=TOKEN',
+        'api'     => 'AFVeo Stream API v3',
+        'version' => '3.0',
+        'flow'    => [
+            '1_token'     => '?action=token&type=movie&id=550',
+            '2_providers' => '?action=providers&type=movie&id=550&token=TOKEN → قائمة المصادر',
+            '3_sources'   => '?action=sources&type=movie&id=550&provider=lookmovie&token=TOKEN → روابط التشغيل',
         ],
-        'note' => 'التوكن مرتبط بـ id+type، يدوم 24 ساعة، جدده قبل expires_at',
+        'providers' => array_map(fn($p) => $p['id'], get_providers()),
     ]);
 }
 
-api_err('action غير معروف', 400);
+api_err('action غير معروف — جرّب ?action=docs', 400);
